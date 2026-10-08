@@ -1,46 +1,66 @@
-import uuid
-
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 
+from webhook.models import Webhook
 from webhook.schemas import WebhookCreate, WebhookResponse, WebhookUpdate
 
-_webhooks: dict[str, WebhookResponse] = {}
 
-
-def create_webhook(data: WebhookCreate) -> WebhookResponse:
-    webhook = WebhookResponse(
-        id=f"webhook_{uuid.uuid4().hex[:8]}",
-        name=data.name,
-        url=str(data.url),
-        maxRetries=data.maxRetries,
-        timeoutSeconds=data.timeoutSeconds,
-        active=True,
+def _to_response(webhook: Webhook) -> WebhookResponse:
+    return WebhookResponse(
+        id=webhook.id,
+        name=webhook.name,
+        url=webhook.url,
+        maxRetries=webhook.max_retries,
+        timeoutSeconds=webhook.timeout_seconds,
+        active=webhook.active,
     )
-    _webhooks[webhook.id] = webhook
-    return webhook
 
 
-def get_all_webhooks() -> list[WebhookResponse]:
-    return list(_webhooks.values())
-
-
-def get_webhook(webhook_id: str) -> WebhookResponse:
-    webhook = _webhooks.get(webhook_id)
+def _get_or_404(db: Session, webhook_id: str) -> Webhook:
+    webhook = db.get(Webhook, webhook_id)
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")
     return webhook
 
 
-def update_webhook(webhook_id: str, data: WebhookUpdate) -> WebhookResponse:
-    webhook = get_webhook(webhook_id)
+def create_webhook(db: Session, data: WebhookCreate) -> WebhookResponse:
+    webhook = Webhook(
+        name=data.name,
+        url=str(data.url),
+        max_retries=data.maxRetries,
+        timeout_seconds=data.timeoutSeconds,
+        active=True,
+    )
+    db.add(webhook)
+    db.commit()
+    db.refresh(webhook)
+    return _to_response(webhook)
+
+
+def get_all_webhooks(db: Session) -> list[WebhookResponse]:
+    return [_to_response(w) for w in db.query(Webhook).all()]
+
+
+def get_webhook(db: Session, webhook_id: str) -> WebhookResponse:
+    return _to_response(_get_or_404(db, webhook_id))
+
+
+def update_webhook(db: Session, webhook_id: str, data: WebhookUpdate) -> WebhookResponse:
+    webhook = _get_or_404(db, webhook_id)
     changes = data.model_dump(exclude_unset=True)
-    if "url" in changes and changes["url"] is not None:
-        changes["url"] = str(changes["url"])
-    updated = webhook.model_copy(update=changes)
-    _webhooks[webhook_id] = updated
-    return updated
+    mapping = {"maxRetries": "max_retries", "timeoutSeconds": "timeout_seconds"}
+    for key, value in changes.items():
+        if value is None:
+            continue
+        if key == "url":
+            value = str(value)
+        setattr(webhook, mapping.get(key, key), value)
+    db.commit()
+    db.refresh(webhook)
+    return _to_response(webhook)
 
 
-def delete_webhook(webhook_id: str) -> None:
-    get_webhook(webhook_id)
-    del _webhooks[webhook_id]
+def delete_webhook(db: Session, webhook_id: str) -> None:
+    webhook = _get_or_404(db, webhook_id)
+    db.delete(webhook)
+    db.commit()
